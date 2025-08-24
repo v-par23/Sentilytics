@@ -103,8 +103,8 @@ with st.sidebar:
 
     default_path = None
     if uploaded is None:
-        st.write("Or place `NewReviews.csv.zip` in this folder and enter the name below.")
-        default_path = st.text_input("Local file path (optional)", value="NewReviews.csv.zip")
+        st.write("Or place `NewReviews.csv` in this folder and enter the name below.")
+        default_path = st.text_input("Local file path (optional)", value="NewReviews.csv")
 
     sample_n = st.slider("Rows to analyze", min_value=100, max_value=5000, value=500, step=100)
     run_roberta = st.checkbox("Run RoBERTa on dataset (slower)", value=False)
