@@ -7,23 +7,25 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 import seaborn as sns
+from wordcloud import WordCloud
 
 import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
+from textblob import TextBlob
+from datasets import load_dataset
 
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from scipy.special import softmax
 
+# ---------------------- Streamlit Page ----------------------
 st.set_page_config(page_title="Sentilytics — Amazon Review Sentiment", layout="wide")
 st.title("🛒 Sentilytics — Amazon Review Sentiment Explorer")
 st.caption("Compare VADER (lexicon) vs RoBERTa (transformer) on Amazon reviews")
 
-# ---------- Helpers & Caching ----------
-
+# ---------------------- Helper Functions ----------------------
 @st.cache_data(show_spinner=False)
 def read_csv_or_zip(file_or_path: Union[str, io.BytesIO, "UploadedFile"]) -> pd.DataFrame:
-    """Read a CSV or a ZIP containing a CSV."""
     if isinstance(file_or_path, str):
         if file_or_path.lower().endswith(".zip"):
             with zipfile.ZipFile(file_or_path) as zf:
@@ -31,8 +33,6 @@ def read_csv_or_zip(file_or_path: Union[str, io.BytesIO, "UploadedFile"]) -> pd.
                 with zf.open(first) as f:
                     return pd.read_csv(f)
         return pd.read_csv(file_or_path)
-
-    # Streamlit UploadedFile or BytesIO
     name = getattr(file_or_path, "name", "uploaded")
     if name.lower().endswith(".zip"):
         with zipfile.ZipFile(file_or_path) as zf:
@@ -95,16 +95,30 @@ def add_roberta_scores(df: pd.DataFrame, text_col: str = "Text", limit: Optional
     base = df.iloc[:len(scores_df)].reset_index(drop=True)
     return pd.concat([base, scores_df], axis=1)
 
-# ---------- Sidebar Controls ----------
+def clean_text(text):
+    from nltk.corpus import stopwords
+    nltk.download("stopwords", quiet=True)
+    stop_words = set(stopwords.words("english"))
+    words = [word for word in text.split() if word.lower() not in stop_words]
+    return " ".join(words)
 
+def get_sentiment(text):
+    return TextBlob(text).sentiment.polarity
+
+# ---------------------- Sidebar Controls ----------------------
 with st.sidebar:
     st.header("⚙️ Options")
-    uploaded = st.file_uploader("Upload CSV or ZIP containing a CSV", type=["csv", "zip"])
-
+    data_source = st.selectbox("Select Data Source", ["Local CSV/ZIP", "Real Amazon Reviews (Hugging Face)"])
+    uploaded = None
     default_path = None
-    if uploaded is None:
-        st.write("Or place `NewReviews.csv` in this folder and enter the name below.")
-        default_path = st.text_input("Local file path (optional)", value="NewReviews.csv")
+
+    if data_source == "Local CSV/ZIP":
+        uploaded = st.file_uploader("Upload CSV or ZIP containing a CSV", type=["csv", "zip"])
+        if uploaded is None:
+            st.write("Or place a CSV/ZIP in this folder and enter the name below.")
+            default_path = st.text_input("Local file path (optional)", value="NewReviews.csv")
+    else:
+        st.info("Using Hugging Face Amazon Polarity dataset (binary stars).")
 
     sample_n = st.slider("Rows to analyze", min_value=100, max_value=5000, value=500, step=100)
     run_roberta = st.checkbox("Run RoBERTa on dataset (slower)", value=False)
@@ -112,110 +126,70 @@ with st.sidebar:
     text_col = st.text_input("Text column name", value="Text")
     id_col = st.text_input("ID column name (optional)", value="Id")
 
-# ---------- Load Data ----------
-
+# ---------------------- Load Data ----------------------
 try:
-    if uploaded is not None:
-        df = read_csv_or_zip(uploaded)
-    elif default_path:
-        df = read_csv_or_zip(default_path)
+    if data_source == "Local CSV/ZIP":
+        if uploaded is not None:
+            df = read_csv_or_zip(uploaded)
+        elif default_path:
+            df = read_csv_or_zip(default_path)
+        else:
+            st.stop()
+        if text_col not in df.columns:
+            st.error(f"Column `{text_col}` not found. Available columns: {list(df.columns)}")
+            st.stop()
+        df = df.head(sample_n).copy()
+        df = ensure_score_numeric(df)
+
     else:
-        st.stop()
+        dataset = load_dataset("amazon_polarity", split=f"train[:{sample_n}]")
+        df = pd.DataFrame({
+            "Id": range(len(dataset)),
+            "Score": dataset["label"],
+            "Text": dataset["content"]
+        })
+        df["Score"] = df["Score"].map({0:1, 1:5})  # Binary stars
+        df["CleanText"] = df["Text"].apply(clean_text)
+        df["Sentiment"] = df["CleanText"].apply(get_sentiment)
 
-    if text_col not in df.columns:
-        st.error(f"Column `{text_col}` not found. Available columns: {list(df.columns)}")
-        st.stop()
-
-    df = df.head(sample_n).copy()
-    df = ensure_score_numeric(df)
 except Exception as e:
-    st.error(f"Failed to read data: {e}")
+    st.error(f"Failed to load data: {e}")
     st.stop()
 
-# ---------- Compute Scores ----------
+# ---------------------- Compute VADER/RoBERTa ----------------------
+if data_source == "Local CSV/ZIP":
+    with st.spinner("Computing VADER sentiment..."):
+        df_v = add_vader_scores(df, text_col=text_col)
 
-with st.spinner("Computing VADER sentiment..."):
-    df_v = add_vader_scores(df, text_col=text_col)
-
-if run_roberta:
-    with st.spinner("Running RoBERTa (transformer) on dataset..."):
-        df_r = add_roberta_scores(df, text_col=text_col, limit=int(roberta_limit))
-else:
-    df_r = None
-
-# ---------- Overview ----------
-
-left, right = st.columns([1, 1])
-with left:
-    st.subheader("Dataset preview")
-    st.dataframe(df_v.head(10), use_container_width=True)
-
-with right:
-    st.subheader("Counts by star rating")
-    if "Score" in df_v.columns:
-        counts = df_v["Score"].value_counts().sort_index()
-        fig, ax = plt.subplots(figsize=(5, 3))
-        counts.plot(kind="bar", ax=ax)
-        ax.set_xlabel("Stars")
-        ax.set_ylabel("Count")
-        ax.set_title("Review count by stars")
-        st.pyplot(fig)
+    if run_roberta:
+        with st.spinner("Running RoBERTa (transformer) on dataset..."):
+            df_r = add_roberta_scores(df, text_col=text_col, limit=int(roberta_limit))
     else:
-        st.info("No `Score` column found—skipping star-based charts.")
+        df_r = None
 
-# ---------- VADER vs Stars ----------
+# ---------------------- Overview ----------------------
+st.subheader("Dataset Preview")
+st.dataframe(df.head(10))
 
-if "Score" in df_v.columns:
-    st.subheader("VADER sentiment vs. star rating")
-    group = df_v.groupby("Score")[["vader_pos", "vader_neu", "vader_neg", "vader_compound"]].mean()
+st.subheader("Review Score Distribution")
+fig, ax = plt.subplots()
+sns.countplot(data=df, x="Score", hue="Score", legend=False, palette="viridis")
+st.pyplot(fig)
 
-    fig2, ax2 = plt.subplots(figsize=(7, 3))
-    group["vader_compound"].plot(kind="bar", ax=ax2)
-    ax2.set_title("Average VADER compound by stars")
-    ax2.set_xlabel("Stars")
-    ax2.set_ylabel("Mean compound")
-    st.pyplot(fig2)
+if data_source == "Real Amazon Reviews (Hugging Face)":
+    st.subheader("Sentiment Polarity Distribution")
+    fig, ax = plt.subplots()
+    sns.histplot(df["Sentiment"], bins=20, kde=True, ax=ax, color="blue")
+    st.pyplot(fig)
 
-    fig3, axs = plt.subplots(1, 3, figsize=(12, 3))
-    sns.barplot(x=group.index, y=group["vader_pos"].values, ax=axs[0])
-    sns.barplot(x=group.index, y=group["vader_neu"].values, ax=axs[1])
-    sns.barplot(x=group.index, y=group["vader_neg"].values, ax=axs[2])
-    axs[0].set_title("Positive")
-    axs[1].set_title("Neutral")
-    axs[2].set_title("Negative")
-    for ax in axs:
-        ax.set_xlabel("Stars")
-        ax.set_ylabel("Mean")
-    st.pyplot(fig3)
+    st.subheader("Word Cloud of Reviews")
+    wordcloud = WordCloud(width=800, height=400).generate(" ".join(df["CleanText"]))
+    plt.figure(figsize=(10,5))
+    plt.imshow(wordcloud, interpolation="bilinear")
+    plt.axis("off")
+    st.pyplot(plt)
 
-# ---------- RoBERTa vs Stars ----------
-
-if df_r is not None and "Score" in df_r.columns:
-    st.subheader("RoBERTa sentiment vs. star rating")
-    group_r = df_r.groupby("Score")[["roberta_pos", "roberta_neu", "roberta_neg"]].mean()
-
-    fig4, ax4 = plt.subplots(figsize=(7, 3))
-    group_r["roberta_pos"].plot(kind="bar", ax=ax4)
-    ax4.set_title("Average RoBERTa positive by stars")
-    ax4.set_xlabel("Stars")
-    ax4.set_ylabel("Mean positive probability")
-    st.pyplot(fig4)
-
-# ---------- Mismatch Explorer ----------
-
-if (df_r is not None) and ("Score" in df.columns):
-    st.subheader("Where model sentiment disagrees with stars (interesting cases)")
-    working = df_r.copy()
-    working["disagree"] = np.where(
-        working["Score"] <= 2, working["roberta_pos"], working["roberta_neg"]
-    )
-    top_k = working.sort_values("disagree", ascending=False).head(10)
-    show_cols = [c for c in [id_col if id_col in top_k.columns else None, "Score", text_col,
-                             "roberta_pos", "roberta_neu", "roberta_neg"] if c]
-    st.dataframe(top_k[show_cols], use_container_width=True)
-
-# ---------- Try it yourself ----------
-
+# ---------------------- Try Your Own Text ----------------------
 st.subheader("Try your own text")
 user_text = st.text_area("Enter a review text", value="This arrived next day and the quality is fantastic. Totally worth it!")
 col1, col2 = st.columns(2)
@@ -230,8 +204,8 @@ with col2:
     tokenizer, model = load_roberta()
     df_one = roberta_scores_batch([user_text], tokenizer, model)
     row = df_one.iloc[0]
-    st.metric("RoBERTa positive", f"{row['roberta_pos']:.3f}")
-    st.write({k: round(row[k], 3) for k in ("roberta_pos", "roberta_neu", "roberta_neg")})
+    st.metric("RoBERTa positive", f"{float(row['roberta_pos']):.3f}")
+    st.write({k: f"{float(row[k]):.3f}" for k in ("roberta_pos", "roberta_neu", "roberta_neg")})
 
 st.caption("Notes: VADER is lexicon-based; RoBERTa is a transformer fine-tuned for sentiment. "
            "Running RoBERTa on the whole dataset can be slower on CPU; use the limit control.")
