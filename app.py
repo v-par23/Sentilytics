@@ -15,7 +15,7 @@ from textblob import TextBlob
 from datasets import load_dataset
 
 import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from scipy.special import softmax
 
 st.set_page_config(page_title="🛒 Sentilytics — Amazon Review Sentiment", layout="wide")
