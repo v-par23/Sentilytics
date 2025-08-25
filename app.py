@@ -23,7 +23,11 @@ import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from scipy.special import softmax
 
-st.set_page_config(page_title="🛒 Sentilytics — Amazon Review Sentiment", layout="wide")
+st.set_page_config(
+    page_title="Sentilytics — Amazon Review Sentiment", 
+    layout="wide",
+    favicon="🛒"
+)
 st.title("🛒 Sentilytics — Amazon Review Sentiment Explorer")
 st.caption("Compare VADER (lexicon) vs RoBERTa (transformer) on Amazon reviews")
 
