@@ -10,3 +10,6 @@ scipy
 textblob
 datasets
 wordcloud
+tokenizers
+Pillow
+pyarrow

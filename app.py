@@ -12,7 +12,12 @@ import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
 from wordcloud import WordCloud
 from textblob import TextBlob
-from datasets import load_dataset
+try:
+    from datasets import load_dataset
+    DATASETS_AVAILABLE = True
+except ImportError:
+    DATASETS_AVAILABLE = False
+    print("Warning: datasets library not available. Hugging Face dataset option will be disabled.")
 
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -112,7 +117,11 @@ def get_sentiment(text):
 
 with st.sidebar:
     st.header("⚙️ Options")
-    data_source = st.selectbox("Select Data Source", ["Local CSV/ZIP", "Real Amazon Reviews (Hugging Face)"])
+    data_source_options = ["Local CSV/ZIP"]
+    if DATASETS_AVAILABLE:
+        data_source_options.append("Real Amazon Reviews (Hugging Face)")
+    
+    data_source = st.selectbox("Select Data Source", data_source_options)
     uploaded = None
 
     if data_source == "Local CSV/ZIP":
@@ -146,17 +155,21 @@ try:
         df = ensure_binary_stars(df)
 
     else:
-        dataset = load_dataset("amazon_polarity", split=f"train[:{sample_n}]")
-        df = pd.DataFrame({
-            "Id": range(len(dataset)),
-            "Score": dataset["label"],
-            "Text": dataset["content"]
-        })
-        df["Score"] = df["Score"].map({0:1, 1:5})  # Binary stars
-        df["CleanText"] = df["Text"].apply(clean_text)
-        df["Sentiment"] = df["CleanText"].apply(get_sentiment)
-        # Initialize df_v for Hugging Face data (no VADER scores needed)
-        df_v = None
+        if DATASETS_AVAILABLE:
+            dataset = load_dataset("amazon_polarity", split=f"train[:{sample_n}]")
+            df = pd.DataFrame({
+                "Id": range(len(dataset)),
+                "Score": dataset["label"],
+                "Text": dataset["content"]
+            })
+            df["Score"] = df["Score"].map({0:1, 1:5})  # Binary stars
+            df["CleanText"] = df["Text"].apply(clean_text)
+            df["Sentiment"] = df["CleanText"].apply(get_sentiment)
+            # Initialize df_v for Hugging Face data (no VADER scores needed)
+            df_v = None
+        else:
+            st.error("Hugging Face datasets are not available. Please use Local CSV/ZIP option instead.")
+            st.stop()
 
 except Exception as e:
     st.error(f"Failed to load data: {e}")
@@ -175,7 +188,7 @@ if data_source == "Local CSV/ZIP":
         df_r = None
 
 # For Hugging Face Amazon reviews, optionally run RoBERTa
-if data_source == "Real Amazon Reviews (Hugging Face)":
+if data_source == "Real Amazon Reviews (Hugging Face)" and DATASETS_AVAILABLE:
     if run_roberta:
         with st.spinner("Running RoBERTa on Hugging Face Amazon reviews..."):
             df_r = add_roberta_scores(df, text_col="Text", limit=int(roberta_limit))
@@ -192,7 +205,7 @@ fig, ax = plt.subplots()
 sns.countplot(data=df, x="Score", hue="Score", legend=False, palette="viridis")
 st.pyplot(fig)
 
-if data_source == "Real Amazon Reviews (Hugging Face)":
+if data_source == "Real Amazon Reviews (Hugging Face)" and DATASETS_AVAILABLE:
     st.subheader("Sentiment Polarity Distribution")
     fig, ax = plt.subplots()
     sns.histplot(df["Sentiment"], bins=20, kde=True, ax=ax, color="blue")
